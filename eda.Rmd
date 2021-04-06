@@ -1,0 +1,1280 @@
+---
+title: "Estimación de visualizaciones totales para videos subidos a la plataforma TED Talk"
+author: "Adrián García Bruzón, Natalia Madrueño Sierro, Roberto Yubero de Diego"
+date: "25 de diciembre de 2019"
+fig_caption: yes
+
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Introducción
+
+El informe realizado a continuación consistirá en un análisis exploratorio de las variables presentes en un *dataset* compuesto por las *TED Talks* subidas a la página oficial *TED.com* hasta el 21 de septiembre de 2017. A partir de dicho análisis exploratorio, se realizará un modelo de regresión lineal que intente proveer de los objetivos mencionados en la sección *Definición de Objetivos*. 
+El *datset* utilizado ha sido obtenido a través de la plataforma *kaggle.com*, estando disponible en la *url* <https://www.kaggle.com/rounakbanik/ted-talks>. 
+
+Algunas de las variables destacadas del *dataset* son las siguientes:
+
+* Variable **views**: Número de visualizaciones de cada vídeo.
+* Variable **duration**: Duración del vídeo.
+* Variable **publish_date**: Fecha de publicación.
+* Variable **comments**: Número de comentarios.
+* Variable **speaker**: Ponente de la charla.
+* Variable **event**: Evento *TED* donde se desarrolló la charla.
+* Variable **rating**: Votos para las distintas categorías *(p.e: funny=19600, ingenious=10000, unconvincing=300, etc)*.
+* Variable **tags**: Temáticas del vídeo *(p.e: culture, creativity, alternative energy, etc)*.
+
+# Definición de Objetivos
+
+El objetivo principal del proyecto es diseñar un modelo de regresión lineal que estime las visualizaciones que tendrá un video subido a la plataforma *TED Talks* en función de aquellas variables que se hayan considerado útiles para este propósito. Las visualizaciones serán la variable respuesta, identificada en el *dataset* con la variable *views*.
+
+Adicionalmente se han considerado algunos objetivos que podrían desarrollarse como trabajos futuros. 
+
+* Relación entre los temas tratados en las charlas con sus visualizaciones (Procesamiento del Lenguaje Natural (NLP)).
+* Evolución de la tendencia a lo largo del tiempo de las charlas (Series Temporales).
+    * Análisis de los temas más populares por año. Temáticas de la que tratará un vídeo en un periodo de tiempo determinado.
+    * Duración de las charlas con el paso del tiempo. 
+    * Cantidad de visualizaciones, idiomas y charlas a lo largo de los años.
+* Profesiones de los *speakers* que proporcionan un mayor número de charlas y un mayor número de visualizaciones (Procesamiento del Lenguaje Natural (NLP)).
+
+
+
+# Preprocesado del dataset
+
+Para el análisis, preprocesado y visualización del *dataset* se han utilizado librerías como *dplyr*, *jsonlite* y *ggplot2* (entre otras). En cuanto a la importación del conjunto de datos, se hará a través de un único fichero en formato *csv*, en el que habrá que realizar una limpieza y preprocesado de la información, como se detallará en los subapartados mostrados a continuación. 
+
+```{r, message=FALSE}
+# Importacion de las librerias
+library(readr)
+library(dplyr)
+library(jsonlite)
+library(anytime)
+library(stringr)
+library(ggplot2)
+library(GGally)
+library(igraph)
+library(ggraph)
+library(leaps)
+library(reshape2)
+library(widyr)
+library(cowplot)
+library(modeest)
+library(corrplot)
+library(bestNormalize)
+```
+
+
+```{r}
+# Importacion del dataset
+#ted_main <- read.csv("/ted_data/ted_main.csv")
+ted_main <- read.csv("/home/natalia/Desktop/Trabajos_Master/FAD/EDA/Markdown/ted_main.csv")
+#ted_main <- read.csv("/home/rober/Escritorio/Master_Data_Science/Asignaturas/Fundamento_ de_analisis_de_Datos/3-Modelos/Practica/ted_main.csv")
+n_observations <- dim(ted_main)[1]     # number of observations
+n_vars <- dim(ted_main)[2]
+id <- seq(1,n_observations)
+dat <- cbind(id,ted_main)
+```
+
+
+
+Tras cargar el set de datos, es necesario realizar un preprocesado sobre algunas de las variables. Principalmente se van a convertir las variables **ratings** y **tags** (almacenadas como diccionarios) y  fechas en formato UNIX (**fil_date** y **published_date**)
+
+## Preprocesado de variable ratings 
+
+Los **ratings** indican la opinión de los espectadores de forma sistemática y resumida a partir de 14 categorías. Si un espectador piensa que la charla es "funny" entonces le da un voto.
+
+Esta variable es suministrada en el dataset en forma de diccionario, en ella se encuentra el nombre del **rating** y las veces que ha sido pulsado por los espectadores del vídeo. Por tanto, para poder trabajar con estos **ratings** es necesario un procesado previo al análisis del *dataset*. 
+
+Esta variable se almacena en un formato similar a *json*. Requiere un preprocesado previo para que sea identificado como *json*. Posteriormente se procesa y se almacena la salida en un nuevo *dataframe*, cuyas variables son incluidas en el *dataset* de trabajo gracias a la función *merge*. 
+
+
+```{r}
+df_rating <- NULL
+for (i in 1:n_observations){
+  rating <- dat[i,]$ratings
+  rating <- gsub("'",'"',rating)
+  result <- fromJSON(rating)
+  result <- result %>% select("name", "count") %>% arrange(desc(name))
+  df_result <- data.frame(i,t(result[2]),row.names = i)
+  colnames(df_result) = c("id", t(result[1]))
+  df_rating <- rbind(df_rating, df_result)
+}
+head(df_rating)
+dat <- merge(x=dat,y=df_rating,by="id",all.x=TRUE)
+```
+
+
+## Preprocesado de variable tags
+
+La variable **tags** indica las temáticas asociadas al vídeo. Esta variable se puede utilizar para crear análisis de similitud entre las charlas y estudiar cuáles temas son los más vistos. En el futuro puede ser de gran útilidad a la hora de procesar el lenguaje natural del presente *dataset*.
+
+El proceso para preprocesar esta variable es similar al anterior ya que están almacenados en forma de diccionario. Principalmente el preprocesado se utilizará para interpretar las 10 **tags** más utilizados en el conjunto de charlas *TED*.
+
+```{r, warning=FALSE}
+df_tags <- NULL
+for (i in 1:n_observations){
+  tags <- dat[i,]$tags
+  tags <- gsub("r's","r",tags) #Hay una de las entradas que tiene un genitivo sajón por lo que falla la transformación. Esta línea lo repara
+  tags <- gsub("'",'"',tags)
+  result <- fromJSON(tags)
+  df_result <- data.frame(i,t(result),row.names = NULL)
+  df_result <- melt(df_result, id.vars='i')     # esta sentencia lanza un warning! "attributes are not identical across measure variables; they will be dropped, esto se debe a que el nivel de factores no es igual para todas las líneas en la columna variable que crea el melt. Esta variable la desechamos en la siguiente línea de codigo por lo que el warning no afecta al resultado.
+  df_tags <- rbind(df_tags,df_result)
+}
+df_tags <-  select(df_tags, -variable)
+tags_count <- data.frame(table(unlist(strsplit(tolower(df_tags$value), ","))))
+```
+
+En el siguiente grafico se pueden ver las 10 **tags** más frecuentes, lo que nos da una idea de los principales temas de los que tratan la mayoría de las charlas. 
+
+```{r}
+tags_count %>%
+  filter(Freq > 225) %>%
+  mutate(Var1 = reorder(Var1, Freq)) %>%  
+  ggplot(aes(Var1, Freq)) +
+  geom_col(aes(fill = Var1)) +
+  xlab(NULL) +
+  ylab ("Frecuencia") +
+  theme_minimal() +
+  coord_flip()
+ 
+```
+
+
+
+## Preprocesado de fechas:  film_date y published_date
+
+
+Ambas fechas están en formáto *UNIX*. Se van a convertir al fomato *dd/mm/yyyy* y posteriormente se extraerá para cada fecha el año y el mes. De este modo, cada valor de fecha generará dos valores asociados.
+
+En primer lugar se procesa **published_date**.
+```{r}
+num2dates <- function (dates_raw){
+  date <- anydate(dates_raw)
+  year <- as.numeric(substring(date, 1, 4))
+  month <- as.numeric(substring(date, 6, 7))
+  dates_out <- data.frame(date, year, month)
+}
+
+#Se convierte published date
+converted_dates <- num2dates(dat$published_date)
+dat$published_date <- converted_dates$date
+dat$published_year <- converted_dates$year
+dat$published_month <- converted_dates$month
+
+#Se reordena el dataframe
+dat <- dat %>%  select(id:published_date, published_year, published_month, ratings:Beautiful)
+```
+
+Posteriormente se repite el proceso para la variable **film_date**.
+```{r}
+converted_dates <- num2dates(dat$film_date)
+dat$film_date <- converted_dates$date
+dat$film_year <- converted_dates$year
+dat$film_month <- converted_dates$month
+
+#Se reordena el dataframe
+dat <- dat %>%  select(id:film_date, film_year, film_month, languages:Beautiful)
+```
+
+
+Reordenamos el **dataframe** y eliminamos algunas variables que no se utilizarán en los procesos posteriores (variables descartadas: **url**, **related_talks**, **ratings** (ya esta incluida gracias al preprocesado previo), **num_speaker**, **name**, **speaker_occupation** y **description**. 
+
+El nuevo orden del **dataframe** está regido por la fecha de grabación del vídeo.
+
+```{r}
+dat <- dat %>% select(id, views, comments, duration, languages, event, film_date:film_month, published_date:published_month,
+                      title, main_speaker, tags, Unconvincing:Beautiful)
+dat <- dat %>% arrange(film_date)
+dat$id <- seq(1, n_observations)
+```
+
+
+
+# Separacion en train test y validation
+
+El *dataset* original se dividirá en un conjunto de entrenamiento (*train*), uno de testeo (*test*) y uno de validación (*validation*). Como su nombre indica, el conjunto *train* se utilizará para entrenar nuestro modelo, comparándolo en el proceso de selección de variables con el conjunto *test*. Una vez preparado el modelo y antes de una posible puesta en producción, se hará una última verificación con el conjunto *validation*, no usado anteriormente para el análisis del modelo.
+
+Debido a la evolución de determinadas variables a lo largo del tiempo, se realizará un *split* temporal en contraposición de uno aleatorio, el conjunto de entrenamiento estará compuesto por un subconjunto de datos del *dataset* original en orden cronológico ascendente respecto a la fecha de publicación de cada *TED talk*, lo que proporciona estabilidad y coherencia en dichas variables afectadas por el paso del tiempo. Por el contrario, los conjuntos de *test* y *validation* estarán compuestos por una mezcla aleatoria de los últimos años del *dataset*, no pertenecientes al conjunto de *train*. 
+
+Para determinar el tamaño del subconjunto que pertenecerá a *train* y el subconjunto que pertenecerá a *test* y *validation* se hará una primera división de los datos. Dicha división estará compuesta por dos subconjuntos, el subconjunto *A*, el cual representa aproximadamente al *80%* de los datos y el subconjunto *B*, el cual representa aproximadamente al *20%* restante. Estas divisiones son homólogas al proceso de separación de forma aleatoria en *train*, *test* y *validation*. A continuación, en el subconjunto *A* se repetirá nuevamente el proceso: se dividirá en el subconjunto *A1*, correspondiente aproximadamente al *80%* de los datos y el subconjunto *A2*, correspondiente aproximadamente al *20%* de los datos. Esta división pertenecería nuevamente al proceso usual de división en *train* y *test*. Todo este proceso  de división en *train*, *test* y *validation* se realiza con el objetivo de conseguir una mejor separación y comprensión de dichos subconjuntos, intentando realizar *cortes* significativos del *dataset* original.  
+
+Resumiendo, las subdivisiones en *train*, *test* y *validation* descritas se corresponden con el siguiente esquema de división del *dataset*:
+
+* Conjunto *A* *(80%)*
+  * Conjunto *A1* *(80%)* = *64%* del conjunto original // *Train*
+  * Conjunto *A2* *(20%)* = *16%* del conjunto original // *Test*
+* Conjunto *B* *(20%)* = *20%* del conjunto original //*Validation*
+
+Para conseguir esta separación en primer lugar se evaluará de forma aproximada con la función *summary* como se distribuyen las fechas de publicación en las charlas *TED*.
+
+```{r}
+summary(dat$published_year)
+```
+
+Se observa que el *75%* de los datos (tercer cuartil) se publicaron antes del 2015. Para facilitar el análisis, se intentará establecer el primer punto de corte entre el conjunto *A* y el conjunto *B* en el año de publicación que proporcione una división aproximada de *80-20%*. Para ello, como parece que el año *2015* representa aproximadamente el *75%*, se analizará que proporción de datos supondría poner el punto de corte en el año *2016*.
+
+```{r}
+before_2016 = dat %>% filter(published_year < 2016) %>% count()
+after_2016 = dat %>% filter(published_year >= 2016) %>% count()
+before_2016_per <- before_2016 / nrow(dat)
+after_2016_per <- after_2016 / nrow(dat)
+cat(paste0(" Antes de 2016: ", before_2016_per), "\n", paste0("Despues y Durante el 2016: ", after_2016_per))
+```
+
+Por lo que los primeros subconjuntos *A* y *B*, donde se produce el *primer corte*, podrían ser las charlas publicadas antes del año 2016, correspondientes aproximadamente al *80%* y las charlas publicadas después y durante el 2016, correspondientes al *20%* del conjunto total del *dataset*.
+
+Nuevamente, se cogerá el conjunto *A* y se volverá a dividir en *A1* y *A2*. Para ello, se repetirá el análisis utilizado la variable *published_year* para determinar las fechas de separación.
+
+
+```{r}
+dat %>% filter(published_year < 2016) %>% select(published_year) %>% summary()
+```
+
+Esta vez, el tercer cuartil corresponde con el año 2013. Nuevamente, como el año 2013 representa aproximadamente el *75%* de los datos, se volverá a comprobar el porcentaje de datos correspondientes a antes y después del 2014 para intentar establecer en dicho año el *segundo punto de corte*, que divida el conjunto *A* en los conjuntos *A1* y *A2*, con aproximadamente un *80%* y *20%* de los datos.
+
+```{r}
+before_2014 = dat %>% filter(published_year < 2016) %>% filter(published_year < 2014) %>% count()
+after_2014 = dat %>% filter(published_year < 2016) %>% filter(published_year >= 2014) %>% count()
+before_2014_per <- before_2014 / nrow(dat %>% filter(published_year < 2016))
+after_2014_per <- after_2014 / nrow(dat %>% filter(published_year < 2016))
+cat(paste0(" Antes de 2014: ", before_2014_per), "\n", paste0("Despues y Durante 2014: ", after_2014_per))
+```
+
+En esta ocasión, sigue una distribución aproximada del *80%* de los datos para el conjunto *A1* y *20%* para el conjunto *A2*, por lo que el *segundo corte* y su pertinente división se hará nuevamente entre antes del 2014 para el conjunto *A1* y después y durante el 2014 para el conjunto *A2*
+
+Como se mencionó anteriormente, se mezclarán los conjuntos *A1* y *B* para una representación equitativa de posibles datos entrantes en el futuro, tanto en *train* como en *test*. Para ello, se dividirá el *dataset* en *train*, correspondiente aproximadamente al *64%* del conjunto inicial, representado por las fechas anteriores a 2013 y en *test* y *validation*, correspondientes aproximadamente al *36%* del conjunto inicial, representado por los datos mezclados aleatoriamente en las fechas desarrolladas durante y después del 2014.
+
+```{r}
+set.seed(1234)
+dat_train <- dat %>% filter(published_year < 2014)
+dat_test_validation <- dat %>% filter(published_year >= 2014) 
+random_test_validation <- dat_test_validation[sample(nrow(dat_test_validation)),]
+```
+
+Una vez obtenido el conjunto aleatorio representativo de *test* y *validation*, se calcula y se asigna el tamaño del conjunto que le pertenecería a *train* y a *validation*, empleando los porcentajes asignados anteriormente.
+
+```{r}
+size_validation = as.numeric(after_2016_per * nrow(dat))
+size_test = as.numeric(nrow(random_test_validation) - size_validation)
+dat_test <- random_test_validation[1:size_test,]
+dat_validation <- random_test_validation[(size_test+1):nrow(random_test_validation),]
+
+cat(paste0(" Observaciones correspondientes a train: ", nrow(dat_train)), "\n",
+    paste0("--> Porcentaje correspondiente a train: ", round(nrow(dat_train)/nrow(dat), 2)), "\n",
+    paste0("Observaciones correspondientes a test: ", size_test), "\n",
+    paste0("--> Porcentaje correspondiente a test: ", round(nrow(dat_test)/nrow(dat),2)), "\n",
+    paste0("Observaciones correspondientes a validation: ", size_validation), "\n",
+    paste0("--> Porcentaje correspondiente a validation: ", round(size_validation/nrow(dat),2)))
+```
+
+Los conjuntos de datos obtenidos son: *train*, *test* y *validation*.
+
+
+# Análisis exploratorio inicial 
+
+En este apartado, una vez realizado el preprocesado de algunas variables y separada la muestra en tres conjuntos de datos, se va a realizar un análisis exploratorio de las variables numéricas, no desechadas en el apartado anterior. 
+
+## Visualizacion variables numéricas
+
+En primer lugar, se revisan los histogramas. En caso de que sus distribuciones no sean normales, dichas variables se reservarán para una transformación posterior que modifique la distribución de la variable, con intención de asemejarla  a una distriución normal. 
+Adicionalmente se muestarán los *boxplots* para complementar la información de las variables. Esta representación también será útil para identificar las variables que podrían necesitar transformaciones posteriores.
+
+
+Visualización de los histogramas de parte de las variables numéricas:
+```{r, warning=FALSE, message=FALSE}
+vars <- colnames(dat_train)
+numeric_vars <- c(2, 3, 4, 5, 8, 9, 11, 12)
+p1 <- ggplot(dat_train, aes(x=views)) + geom_histogram(fill="red", colour="black", alpha = 0.5)
+p2 <- ggplot(dat_train, aes(x=comments)) + geom_histogram(fill="blue", colour="black", alpha = 0.5)
+p3 <- ggplot(dat_train, aes(x=duration)) + geom_histogram(fill="green", colour="black", alpha = 0.5)
+p4 <- ggplot(dat_train, aes(x=languages)) + geom_histogram(fill="orange", colour="black", alpha = 0.5)
+plot_grid(p1, p2, p3, p4)
+# Se almacenan las variables que deben transformarse posteriormente
+numvars2convert = c("views", "comments", "duration")
+```
+
+Se identifican las variables sobre las que se realizará una conversión posterior: **views**, **comments**, **duration**.
+Se identifica, además, un exceso de ceros en la variable **languages**. Es posible que esta variable necesite un tratamiento de datos faltantes.
+
+Visualización de boxplots para las variables anteriores:
+```{r, warning=FALSE}
+# Visualizacion variables numéricas (1/2) --> Boxplots
+b1 <- ggplot(dat_train, aes(x="views", y=views)) + geom_boxplot(fill = "red", alpha=0.5)
+b2 <- ggplot(dat_train, aes(x="comments", y=comments)) + geom_boxplot(fill = "blue", alpha=0.5)
+b3 <- ggplot(dat_train, aes(x="duration", y=duration)) + geom_boxplot(fill = "green", alpha=0.5)
+b4 <- ggplot(dat_train, aes(x="languages", y=languages)) + geom_boxplot(fill = "orange", alpha=0.5)
+plot_grid(b1, b2, b3, b4) 
+```
+
+Como era de esperar, los boxplots requiren que las transformaciones de las variables se apliquen para poder aportar información de interés. Unicamente la variable **languages**, que sigue una distribución normal, muestra un *boxplot* equilibrado. Tras aplicar las transformaciones, se volverán a revisar los *boxplots* de estas variables.
+
+Adicionalmente se revisan los valores mínimos y máximos para verificar que no hay nulos o valores atípicos:
+```{r, warning=FALSE}
+for (var_col in numeric_vars[1:4]){
+  cat(vars[var_col], " --> Min:", min(dat_train[,var_col]), ",  Max:", max(dat_train[,var_col]), "\n")
+}
+```
+
+Los valores de todas las variables mostradas están dentro de los valores "esperados" salvo en el caso de la variable **languages**. Esta variable se tratará más adelante pues, junto con los indicios del histograma, parece que necesitará un tratamiento de los valores igual a cero.
+
+Continuamos visualizando variables numéricas. En este caso se muestran variables con información temporal (fechas en meses y años):
+```{r, warning=FALSE}
+# Se define estilo de visualización para algunos de los plots
+month_names <- c("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
+labels_angle <- theme(axis.text.x = element_text(angle=45))
+scale_month <- scale_x_continuous(breaks=seq(1,12), labels=month_names)
+n_months <- length(month_names)
+min_year <- min(dat_train$published_year)
+max_year <- max(dat_train$published_year)
+scale_years <- scale_x_continuous(breaks=seq(min_year, max_year), labels=seq(min_year, max_year))
+# generacion de plots y visualizacion
+p5 <- ggplot(dat_train, aes(x=film_year)) + geom_histogram(fill="red", alpha=0.5, colour="black", bins=50)
+p6 <- ggplot(dat_train, aes(x=film_month)) + geom_histogram(fill="blue", alpha=0.5, colour="black", bins=n_months) + scale_month + labels_angle 
+p7 <- ggplot(dat_train, aes(x=published_year)) + geom_histogram(fill="green", alpha=0.5, colour="black", bins=(max_year - min_year)) + scale_years + labels_angle
+p8 <- ggplot(dat_train, aes(x=published_month)) + geom_histogram(fill="orange", alpha=0.5, colour="black", bins=n_months) + scale_month + labels_angle 
+plot_grid(p5, p6, p7, p8, align="h")
+```
+
+
+De la visualización anterior (**publised_year** y **film_year**) se extraen algunas conclusiones interesantes, útiles para poner en contexto el *dataset*:
+ - Las charlas *TED*, a pesar de que comenzaron a publicarse a partir de 2005, tienen asociados videos desde 1972.
+ - El número de charlas publicadas aumentó desde 2005 hasta 2013.
+ - Las fechas de publicación están repartidas a lo largo del año de una forma uniforme, con un tramo decreciente en los últimos meses del año
+ 
+Sobre estas variables no se pretende aplicar ninguna transformación debida a la naturaleza de las mismas (contienen valores temporales). Estas variables se han utilizado para dividir el *dataset*; en concreto la variable **published_year**. A la hora de modelar la regresión lineal veremos si aportan algún tipo de mejora al ajuste de la regresión lineal multivariable.
+
+
+
+# Detección, tratamiento e imputación de datos faltantes  
+
+En el apartado anterior se ha observado una anomalía en el histograma y en los valores mínimos de la variable **languages**. Esta variable indica el número de idiomas al que se ha traducido una charla. Al tratarse de charlas, no parece lógico que este valor sea cero.
+
+Explorando los campos **description** y **tags** se ha observado que el *dataset* contiene, además de charlas, actuaciones musicales o artísticas en las que no hay un ponente como tal. En estos casos el cero es un valor correcto.
+
+Para aquellas observaciones en las que sí se trata de una charla, y el valor de **languages** es cero, estamos ante valores erróneos que hay que corregir. 
+
+Se van a probar dos métodos de imputación, para elegir el que mejor resultados ofrezca.
+- Método 1 de imputación --> Moda
+- Método 2 de imputación --> Distribución normal 
+
+
+```{r}
+summary(dat_train$published_year)
+cat("Porcentaje de muestras: ", round(nrow(dat_train)/nrow(dat),2))
+p_orig <- ggplot(dat_train, aes(x=languages)) + geom_histogram(fill="red", alpha=0.3, colour="black", bins=max(dat_train$languages) - min(dat_train$languages)) + scale_y_continuous(limits=c(0, 250)) + ggtitle("Data train")
+```
+
+
+
+Valoramos el número de ocurrencias de datos erróneos contenidos en el conjunto *train*.
+```{r}
+ids_not_ok <- (dat_train$languages == 0 & str_detect(dat_train$tags, "music|dance|live music", negate = TRUE))
+n_not_ok <- length (ids_not_ok[ids_not_ok == TRUE])
+frec_nok <- n_not_ok/nrow(dat_train)
+cat("Porcentaje de observaciones de la variable languages a imputar: ", round(100*frec_nok, 1), "%")
+```
+
+Al tratarse de un 3.9% intentaremos imputar los datos para evitar perder información.
+
+## Método 1 de imputación: Moda
+Los valores erróneos se imputarán con la moda de la variable. Solución simple. Habrá que valorar como de bueno es el resultado que ofrece.
+
+Visualizamos cómo ha cambiado la distribución al imputar los ceros con la moda de la variable:
+```{r}
+# Cálculo de la moda
+getmode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+languages_moda = getmode(dat_train$languages)
+# imputamos con la moda los 0 que corresponda
+languages_corrected_1 <- dat_train %>% select(languages) %>% mutate(languages = ifelse(languages == 0 & str_detect(tags, "music|dance|live music", negate = TRUE), languages_moda, languages))
+
+# visualizamos el resultado
+p_corrected_1 <- ggplot(languages_corrected_1, aes(x=languages)) + geom_histogram(fill="blue", alpha=0.3, colour="black", bins=max(dat_train$languages) - min(dat_train$languages)) + scale_y_continuous(limits=c(0, 250)) + ggtitle("Método 1 (Moda)")
+plot_grid(p_orig, p_corrected_1)
+```
+
+
+Se observa que imputar con la moda resuelve el exceso de ceros de la muestra original. A pesar de ello, la distribución de los datos imputados está concentrada en la moda, dando un resultado mejorable. Se decide aplicar otra lógica.
+
+en el caso de que la variable **language** tuviese correlación con alguna de las variables numéricas, se podría imputar utilizando el método *knn*, asociando los idiomas en función de su/s vecino/s más cercano/s.
+
+```{r}
+lang_correlations <- cor(dat_train[,numeric_vars])
+cat("Correlaciones con languages: ", lang_correlations[, 4])
+```
+Los mayores valores de correlación se obtienen con las variable **views** (0,38) que al ser la variable respuesta no puede usarse para imputar y la variable **comments** (0,38). Por lo que se descarta la aplicación del método *knn* debido a que las correlaciones son bajas.
+
+## Método 2 de imputacion: Distribución normal 
+
+En este caso se imputará con muestras aleatorias correspondientes a una normal con media y desviacion estandar iguales a las de la distribución de la variable **languages** (excluyendo los valores erróneos).
+
+La variable **languages** toma valores enteros, por lo tanto, redondeamos los valores de la distribucion para imputar valores de una forma acorde a la naturaleza de la variable.
+```{r}
+languages_col <- 5
+lang_mean <- mean(dat_train[!ids_not_ok, languages_col])
+lang_sd <- sd(dat_train[!ids_not_ok, languages_col])
+vals <- rnorm(n_not_ok, mean=lang_mean, sd=lang_sd)
+vals <- round(vals, 0)
+
+# imputamos los valores
+languages_corrected_2 <- dat_train %>% select(languages) %>% mutate(languages = ifelse(languages == 0 & str_detect(tags, "music|dance|live music", negate = TRUE), vals, languages))
+p_corrected_2 <- ggplot(languages_corrected_2, aes(x=languages)) + geom_histogram(fill="green", alpha=0.3, colour="black", bins=max(dat_train$languages) - min(dat_train$languages)) + scale_y_continuous(limits=c(0, 250))  + ggtitle("Método 2 (d. normal)")
+plot_grid(p_orig, p_corrected_1, p_corrected_2, ncol=3)
+```
+
+
+Se observa una mejoría a la hora de imputar la variable **languages** con el método de distribución normal (método 2). Aceptamos esta transformación y actualizamos el **dataframe** con los datos convertidos siguiendo este método.
+```{r}
+dat_train$languages <- languages_corrected_2$languages
+```
+
+Debido a que en la variable **languages** tenemos datos erróneos (NAs que estaban imputados como ceros) y datos que realmente tienen cero traducciones al ser vídeos de música o danza, estamos ante una única variable que tiene dos significados diferentes. Por un lado, nos da información sobre a cuantos idiomas esta traducida la charla y por otro lado, nos da información de aquellos vídeos que son charlas y de cuales son música o danza. Para nosotros lo interesante es conocer sí una charla que está traducida en más idiomas tiene más visitas, por lo que no nos interesan aquellas que no están traducidas al no ser charlas. Debido a esto vamos a quitar del *dataset* aquellos vídeos que tras la imputación siguen teniedo un valor de **languages** igual a cero. 
+
+Por último, hacemos un *summary* para asegurarnos de que efectivamente se han retirado las charlas de música y danza. 
+
+```{r}
+dat_train <- dat_train %>% filter(!(languages == 0))
+summary(dat_train$languages)
+```
+
+# Transformaciones de variables 
+
+## Transformaciones de variables cuantitativas 
+
+Las variables numéricas que, tras hacer el análisis exploratorio, podrían necesitar transformaciones son: **views**, **comments** y **duration**. Se espera que, al aplicar las transformaciones, se logren distribuciones normales para las variables en cuestión.
+
+Aplicamos logaritmos y observamos el resultado:
+```{r message=FALSE}
+p1_mod <- ggplot(dat_train, aes(x=log10(views))) + geom_histogram(fill="red", alpha=0.5,  colour="black")
+p2_mod <- ggplot(dat_train, aes(x=log10(comments))) + geom_histogram(fill="blue", alpha=0.5, colour="black")
+p3_mod <- ggplot(dat_train, aes(x=log10(duration))) + geom_histogram(fill="green", alpha=0.5, colour="black")
+plot_grid(p1, p1_mod, p2, p2_mod, p3, p3_mod, ncol=2)
+```
+
+Las variables **views** y **comments** al aplicarles el logaritmo mejoran su normalidad notablemente, mientras que la variable **duration** no lo hace de igual forma, por lo que se intentará mejorar su normalidad aplicándole diversas transformaciones, entre las que se encuentran *raíz cuadrada* e *inversa*:
+```{r message=FALSE}
+d1 <- ggplot(dat_train, aes(x=log10(duration))) + geom_histogram(fill="green", alpha=0.5, colour="black") 
+d2 <- ggplot(dat_train, aes(x=sqrt(duration))) + geom_histogram(fill="green", alpha=0.5, colour="black")
+d3 <- ggplot(dat_train, aes(x=1/(duration))) + geom_histogram(fill="green", alpha=0.5, colour="black")
+
+plot_grid(d1, d2, d3, ncol=2)
+```
+
+Se observa que las anteriores transformaciones anteriores no mejoran el resultado obtenido al aplicar el logaritmo.
+Por último, va a explorarse el resultado de aplicar las *transformaciones de escala-potencia* *(Box-Cox)*.
+
+```{r warning=FALSE}
+boxcox_trans <- dat$duration %>% as.numeric() %>% boxcox()
+boxcox_duration <- predict(boxcox_trans)
+boxcox_trans
+```
+
+Se aplica la transformación *Box-Cox* con un *lambda* de *0.4779165* y observamos el resultado:
+
+```{r message=FALSE}
+d4 <- ggplot(mapping= aes(boxcox_duration)) + geom_histogram(fill="green", alpha=0.5, colour="black")
+plot_grid(d1, d2, d3, d4, ncol=2)
+```
+
+sta transformación tampoco mejora los resultados anteriores. De este modo se aplicará el *(logaritmo en base 10)* también sobre la variable *duration*.
+
+Mostramos los *boxplot* de las variables modificadas:
+```{r}
+b1_mod <- ggplot(dat_train, aes(x="views", y=log10(views))) + geom_boxplot(fill="red", alpha=0.5)
+b2_mod <- ggplot(dat_train, aes(x="comments", y=log10(comments))) + geom_boxplot(fill="blue", alpha=0.5)
+b3_mod <- ggplot(dat_train, aes(x="duration", y=log10(duration))) + geom_boxplot(fill="green", alpha=0.5) 
+plot_grid(b1, b1_mod, b2, b2_mod, b3, b3_mod, ncol=2) 
+```
+
+Se observa que tanto las distribuciones como los *boxplots* han mejorado notablemente. Se aceptan dichas transformaciones sobre las variables y se actualizan en el *dataframe* de trabajo.
+
+Pintamos las variables numéricas resultantes almacenadas en el *dataframe*:
+```{r message=FALSE}
+#Actualizamos dataframe
+dat_train$views <- log10(dat_train$views)
+dat_train$comments <- log10(dat_train$comments)
+dat_train$duration <- log10(dat_train$duration)
+```
+
+```{r message=FALSE}
+p1 <- ggplot(dat_train, aes(x=views)) + geom_histogram(fill="red", alpha=0.5, colour="black")
+p2 <- ggplot(dat_train, aes(x=comments)) + geom_histogram(fill="blue", alpha=0.5, colour="black")
+p3 <- ggplot(dat_train, aes(x=duration)) + geom_histogram(fill="green", alpha=0.5, colour="black")
+p4 <- ggplot(dat_train, aes(x=languages)) + geom_histogram(fill="orange", alpha=0.5, colour="black", bins=max(dat_train$languages)-min(dat_train$languages))
+p5 <- ggplot(dat_train, aes(x=film_year)) + geom_histogram(fill="purple", alpha=0.5, colour="black", bins=50) + labels_angle
+p6 <- ggplot(dat_train, aes(x=film_month)) + geom_histogram(fill="brown", alpha=0.5, colour="black", bins=12) + scale_month + labels_angle
+p7 <- ggplot(dat_train, aes(x=published_year)) + geom_histogram(fill="yellow",alpha=0.5, colour="black", bins=8) + labels_angle
+p8 <- ggplot(dat_train, aes(x=published_month)) + geom_histogram(fill="pink", alpha=0.5, colour="black", bins=12) + scale_month + labels_angle 
+plot_grid(p1, p2, p3, p4, p5, p6, p7, p8, align="h", ncol=3)
+```
+
+El resultado de las transformaciones se considera satisfactorio. A continuación se procederá a transformar las variables cualitativas.
+
+
+
+## Procesado de variables cualitativas 
+
+### Convertir **rating** en variable categórica 
+
+Las variable **rating** que tratamos en el pre-procesado nos crea catorce variables que resumen la opinión de las personas que han visto el vídeo según una serie de adjetivos. Estas variables como se puede ver en el siguiente gráfico tienden a tener correlaciones positivas entre ellas por lo que introducir todas en el modelo podría hacer que hubiese información redundante, para evitar esto se opta por transformarlas en una variable categórica que resuma la opinión general de la mayoría de los visitantes según el sentido del adjetivo (positivo, neutro o negativo).
+```{r}
+corr <-  dat_train %>% select(16:29) %>%
+  na.omit() %>% cor()
+corrplot(corr, tl.col="black")
+```
+
+Según la opinión experta del grupo se dividen los adjetivos de la siguiente forma:
+  *Positivos:* **Jaw-dropping** (asombroso), **Inspiring** (inspirador), **Funny** (divertido), **Fascinating** (fascinante) y **Beautiful** (precioso).
+  *Neutros:* **Ok** (satisfactorio), **Informative** (informativo), **Ingenious** (ingenioso),  **Persuasive** (persuasivo), **Courageous** (valiente).
+  *Negativos:* **Obnoxious** (desagradable), **Unconvincing** (poco convincente), **Longwinded** (interminable), **Confusing** (confuso). 
+  
+A partir de esa división se realiza una función en la que se contabilizan los **rating** por sentido (positivo, negativo o neutro) y que devuelve el mayor de los tres. Esta función se realiza por cada una de las charlas del *dataset* y se incluye en una nueva variable denominada **general_opinion**. 
+```{r}
+opin_fun = function(x) {
+  opinion <- NULL
+  positive <- x %>% select(`Jaw-dropping`, Inspiring, Funny, Fascinating, Beautiful) %>% sum
+  neutral <- x %>% select(OK, Informative, Ingenious, Persuasive, Courageous) %>% sum
+  negative <- x %>% select(Obnoxious, Unconvincing, Longwinded, Confusing) %>% sum
+  if (positive > neutral & positive > negative){
+    opinion = "positive"
+  } else if (negative > neutral & negative > positive){
+    opinion = "negative"
+  } else {opinion = "neutral"}
+  return(opinion)
+}
+general_opinion <- NULL
+for (i in 1:dim(dat_train)[1]){
+  general_opinion[i] <- opin_fun(dat_train[i,])
+}
+dat_train$general_opinion <- general_opinion
+```
+
+En el último paso quitamos del *dataset* las variables de **rating** quedando únicamente la opinión general. 
+```{r}
+dat_train <- select(dat_train, -(Unconvincing:Beautiful))
+dat_train$general_opinion <- factor(dat_train$general_opinion, ordered = TRUE, levels = c("negative", "neutral", "positive"))
+```
+
+Ahora pasamos a valorar la distribución de la variable **general_opinion** en función de las visitas. Observando una buena distribución de los diferentes grupos frente al logaritmo de las visualizaciones. Aunque se observa que existe cierta relación lineal si nos centramos en las medianas, puede que la variable no sea significativa debido a que existe cierta descompensación en el número de muestras entre los distintos grupos creados. 
+
+```{r}
+g_op_train <-ggplot(dat_train, aes(x=general_opinion, y= log10(views), fill=general_opinion)) +
+  geom_boxplot() + theme_minimal()
+g_op_train
+```
+
+### Categorizar la influencia de un speaker en función del número de charlas 
+
+El nombre del **speaker** carece de utilidad en nuestro estudio, al igual que el titulo o la descripción. Sin embargo, en este caso nos puede servir para calcular la popularidad de los **speakers**, con el objetivo de intentar relacionarla con las visualizaciones de sus vídeos, lo que nos ayudaría a entrenar el modelo.
+
+Para calcular esta popularidad, primero hemos hecho un *count* de las veces que un **speaker** ha intervenido en distintas charlas *TED* incluidas en el *dataset*. En este caso en primer lugar quitamos los signos de puntuación que alguna de las celdas de la variable **main_speaker** tiene, como por ejemplo el '+' entre dos **speakers** cuando ambos son el principal. Acto seguido transformamos la variable de tipo *factor* a *character*. 
+
+Se genera un bucle que recorre la variable contabilizando las veces que el mismo **speaker** aparece en diferentes vídeos y se genera un **data frame** con el nombre del speaker y las veces que aparece en el *dataset*. 
+
+```{r}
+count_speaker <- NULL
+dat_train$main_speaker <- gsub("[[:punct:]]","",dat_train$main_speaker)
+dat_train$main_speaker <- as.character(dat_train$main_speaker)
+for (i in 1:dim(dat_train)[1]){
+  cd <- str_count(dat_train$main_speaker, dat_train[i,"main_speaker"])
+  cd <- sum(cd)
+  count_speaker <- rbind(count_speaker,cd)
+}
+count_speaker <- as.data.frame(cbind(dat_train$main_speaker,count_speaker))
+colnames(count_speaker) <- c("main_speaker","speaker_pop")
+```
+
+A la hora de hacer los grupos se retiran de la muestra todos aquellos **speakers** que solo tienen un vídeo debido a que su popularidad será siempre baja. Retirando estos **speakers** se valoran los tres grupos, siendo los **speaker** por debajo de la mediana categorizados en no populares, aquellos por encima del primer cuartil como muy populares y el resto como populares. 
+
+```{r}
+count_speaker$speaker_pop <- as.integer(count_speaker$speaker_pop)
+c <- count_speaker$speaker_pop[count_speaker$speaker_pop>1]
+not_popular <- median(c)
+popular <- c[quantile(c, probs = 0.75)]
+```
+
+
+Con esta función creamos la distinción entre los diferentes grupos y la aplicamos sobre el **dataframe**. 
+
+```{r}
+pop_fun = function(x) {
+if (x < not_popular){
+  x = "not_popular"
+  
+} else if (x > popular){
+  x = "very_popular"
+  
+} else {x = "popular"}
+}
+count_speaker$speaker_pop <- (lapply(count_speaker$speaker_pop, FUN = pop_fun))
+```
+
+
+Se incluye la nueva columna al *dataset*, quitando previamente los duplicados del **dataframe** **count_speaker** y convirtiendo a *factors* la columna de popularidad. 
+
+```{r, warning = F}
+count_speaker<- count_speaker[!duplicated(count_speaker$main_speaker), ]
+dat_train <-left_join(dat_train, count_speaker,by="main_speaker")
+dat_train$speaker_pop <- factor(dat_train$speaker_pop, ordered = TRUE, levels = c("not_popular", "popular", "very_popular"))
+```
+
+Ahora pasamos a valorar la distribución de la variable **speaker_popularity** en función de las visitas. Observando una buena distribución de los diferentes grupos frente al logaritmo de las visualizaciones. En este caso observamos una relación lineal si nos centramos en las medianas, aunque puede que no sea significativa al tener cierta descompensación en las muestras de cada grupo. 
+
+```{r}
+ggplot(dat_train, aes(x=speaker_pop, y= log10(views), fill=speaker_pop)) +
+  geom_boxplot() + theme_minimal()
+```
+
+### Variables ordinales
+
+Tanto la variable **general_opinion** como la variable **speaker_pop** genera una variable cualitativa ordinal, en las que definimos un orden a la hora de que r cree los *dummies* de estas variables. Debido a que en ambos casos las variables son factores de tres niveles, el *software R* va a calcular los contrastes polinómicos cuadráticos y lineales. Como se observa en la siguiente tabla para la variable **general_opinion**.
+
+```{r}
+contrasts(dat_train$general_opinion)
+```
+
+Sin embargo, debido a que nosotros sólo estamos centrándonos en la linealidad  como forma de predicción hemos decidido descartar los contrastes cuadáticos, utilizando para nuestro modelo la tendencia lineal de estas dos variables ordinales. 
+
+```{r, warning= F, message= F}
+contrasts(dat_train$general_opinion, how.many = 1) <- contr.poly(3)
+contrasts(dat_train$speaker_pop, how.many = 1) <- contr.poly(3)
+```
+
+
+### Convertir variable **events** 
+
+En este caso puede haber interrelación entre los vídeos publicados en un evento *TED* y sus visitas. Puede ser que haya eventos que sean más seguidos que otros y por tanto tengan una relación directa con los vídeos más visualizados. 
+
+En tal caso, lo que hemos hecho es agrupar las charlas *TED* pertenecientes al mismo tipo de evento. En el siguiente código lo que hacemos es quitar la fecha asociada al evento, además quitamos los signos de puntuación que aparecen en algunas de las charlas del mismo tipo. Con respecto a *Tedx*, *TedGlobal* o *Ted@* en algunas ocasiones aparecen además con el nombre de la ciudad o del país donde se realiza y por tanto procedemos a retirar estos nombres.  
+
+```{r}
+dat_train$event <- gsub('[0-9]+', "", dat_train$event)
+dat_train$event <- gsub("[[:punct:]]","", dat_train$event)
+dat_train$event <- gsub('TEDx.*', "TEDx", dat_train$event)
+dat_train$event <- gsub('TEDGlobal.*', "TEDGlobal", dat_train$event)
+dat_train$event <- gsub('TED@.*', "TED@", dat_train$event)
+```
+
+
+Una vez realizados los grupos vemos las charlas pertenecientes a los eventos  *TED* que más se han llevado a cabo. A partir de un *count*. 
+
+```{r}
+event_count <- count(distinct(dat_train), event)
+event_count <- event_count %>% arrange(desc(n))
+head(event_count)
+```
+
+
+Se puede observar como las charlas *TED*, las *TED Global* y las *TEDx* son, con diferencia, los eventos con un mayor número de vídeos. Por lo tanto, reducimos la variable **event** en cuatro categorías: *TED*, *TedGlobal*, *TEDx* y *Other*. 
+
+```{r}
+dat_train <- dat_train %>% mutate(event = ifelse(str_detect(dat_train$event, "TED$|TEDx$|TEDGlobal$", negate = TRUE), "Other", event))
+dat_train$event <- factor(dat_train$event)
+levels(dat_train$event)
+```
+
+Al converir la variable **event**, comprobamos que existen cinco categorías, en vez de las cuatro que queriamos. Por lo que para solucionarlo debemos cambiar los valores erroneos por *TEDGlobal* y luego volver a facotrizar la variable. 
+
+```{r}
+dat_train$event <- gsub('TED Senior Fellows at TEDGlobal', "TEDGlobal", dat_train$event)
+dat_train$event <- factor(dat_train$event)
+levels(dat_train$event)
+```
+
+Ahora pasamos a valorar la distribución de la variable **event** en función de las visitas. Observando una buena distribución de los diferentes grupos frente al logaritmo de las visualizaciones. 
+
+```{r}
+ggplot(dat_train, aes(x=event, y= log10(views), fill=event)) +
+  geom_boxplot() + theme_minimal()
+```
+
+
+# Selección de variables 
+
+Tras la realización de las tareas anteriores, se descartan parte de las variables originales. Dichas variables se descartan por estar incluidas dentro de nuevas variables o por carecer de utilidad; debido a las técnicas de análisis conocidas actualmente. El dataframe final tiene, por lo tanto, 11 variables.
+
+```{r, warning= F, message= F}
+# descarte de todas las variables que no se van a usar en el modelo, usando el conocimiento adquirido tras el EDA y el resto de actividades
+dat_train <-  dat_train %>% select(views, comments, duration, languages, film_year, film_month, published_year, published_month, general_opinion, speaker_pop, event)
+```
+
+El estudio de correlaciones permitirá localizar variables  "sospechosas" de ser descartadas. El motivo de este descarte es el siguiente: si dos variables están altamente correlacionadas entre sí, una de ellas debería descartarse a la hora de generar el modelo, para no incluir información redundante.
+
+Generamos un diagrama de correlaciones para observar las relaciones que existen entre las variables numéricas:
+```{r, warning= F, message= F}
+corr_sel <- dat_train %>% select (views, comments, duration, languages, film_year, film_month, published_year, published_month) %>%
+  na.omit() %>% cor()
+corrplot(corr_sel, tl.col="black")
+```
+Se observan correlaciones relativamente altas entre los siguientes pares de variables:
+* **comments** - **languages** --> Correlación: 0.45
+* **published year** - **film year** --> Correlación: 0.77
+
+A la hora de definir el modelo, probaremos a descartar una variable del par **languages** y **comments**. En el caso de las fechas, vamos a descartar el año de grabación pues, la variable respuesta depende de cuando una charla se publica en la plataforma. Algunas de las charlas se publicaron hasta 30 años después de ser grabadas por lo que parece más lógico descartar la variable **film_date**.
+
+
+Adicionalmente vamos a probar a utilizar un método de detección automática para descartar aquellas variables que no aportan mejoras al modelo. 
+
+En primer lugar utilizamos la función *regsubsets* de la libreria *leaps* la cual valora el mejor *subset* de variables a la hora de hacer una regresión múltiple. Este tipo de selección automática se debe hacer con cuidado, ya que sin un análisis previo suficiente puede llevarnos a entrenar modelos erróneos. 
+
+```{r}
+regfit_full <- leaps::regsubsets(views~ languages + comments + duration +  film_year + film_month + published_year + published_month + general_opinion + speaker_pop + event, dat_train)
+for (metric in c("r2", "adjr2", "Cp", "bic")){plot(regfit_full, scale=metric)}
+```
+
+El metodo aplicado indica que las variables que ofrecen un mejor resultado, al aplicar una regresión lineal, son: **languages**, **comments**, **duration**, **general_opinion.L**, **event Ted** y **event Ted Global**. 
+
+
+
+# Modelado de regresión lineal múltiple (ajuste, interpretación y diagnosis)
+
+En esta última fase vamos a crear nuestro modelo de regresión para predecir el número de visualizaciones de una charla *TED* en función de las caracteristicas del vídeo. 
+
+Probamos con las variables seleccionadas en el apartado anterior:
+```{r}
+model_simple <- lm(views~ languages + comments + duration +  general_opinion + event, dat_train)
+summary (model_simple)
+```
+
+Probamos el mismo modelo pero descartando una de las variables del par **comments**-**languages** por tener una correlación considerablemente alta entre sí. Descartamos primero **languages**.
+
+```{r}
+model_simple_2 <- lm(views~ comments + duration +  general_opinion + event, dat_train)
+summary (model_simple_2)
+```
+
+Aplicando la misma lógica, probamos a descartar **comments**.
+
+```{r}
+model_simple_3 <- lm(views~ languages  + duration +  general_opinion + event, dat_train)
+summary (model_simple_3)
+```
+Se observa que los valores de los coeficientes y la ordenada en el origen son muy similares entre los tres modelos. Adicionalmente comparamos el error residual y *R² corregido*: 
+
+  * model_simple (0.24, 0.58)
+  * model_simple2 (0.25, 0.53)
+  * model_simple3 (0.29, 0.45)
+
+La correlacion entre estas variables (0.45) no es suficientemente representativa como para influir negativamente al modelo, si ambas se incluyen simultaneamente.
+
+Adicionalemnte, se evalua un modelo que incluye todas las variables que se consideraron candidatas para modelar la regresión. 
+
+```{r}
+model_full <- lm(views~ languages + comments + duration + film_year + film_month + published_year + published_month + general_opinion + speaker_pop + event, dat_train)
+summary (model_full)
+```
+Para el modelo que incluye todas las vartiables "interesantes", el error estandar y el *R² corregido* son similares a los modelos anteriores. Sin embargo, los *p-valores* son demasiado altos para varias de las variables. 
+
+Adicionalmente, se observa que los valores *t-value* son bajos en muchas de las variables. Esto indica que la diferencia entre el valor estimado de una variable y su error es bajo, lo cual indica que esa variable aporta ruido al modelo.
+
+
+Además de revisar los resúmenes, se van a revisar las distribuciones de los residuos de cada modelo y su variabilidad. La información de los residuos de cada modelo se muestra a continuación.
+
+```{r message=FALSE, warning=FALSE}
+
+theme_update(plot.title = element_text(hjust = 0.5))
+
+# Model 1
+hist1 <- ggplot(model_simple, aes(x=model_simple$residuals)) + geom_histogram(fill="blue", colour="black", alpha=0.5, bins=70) + ggtitle("Model 1") + xlab("Residuals distribution") + xlim(-1.5, 1.5)
+
+res1 <- ggplot(model_simple, aes(x=model_simple$fitted.values ,y=model_simple$residuals)) + geom_point(colour="blue", alpha=0.2) + geom_smooth(colour="black", alpha=0.7) + xlab("Fitted Values") + ylab("Residuals") + ggtitle("Model 1") + xlim(5, 7.25) + ylim(-1.5, 1.5)
+
+
+# Model 2
+hist2 <- ggplot(model_simple_2, aes(x=model_simple_2$residuals)) + geom_histogram(fill="purple", colour="black", alpha=0.5, bins=70) + ggtitle("Model 2") + xlab("Residuals distribution") + xlim(-1.5, 1.5)
+
+res2 <- ggplot(model_simple_2, aes(x=model_simple_2$fitted.values ,y=model_simple_2$residuals)) + geom_point(colour="purple", alpha=0.2) + geom_smooth(colour="black", alpha=0.7) + xlab("Fitted Values") + ylab("Residuals") + ggtitle("Model 2")  + xlim(5, 7.25) + ylim(-1.5, 1.5)
+
+
+# Model 3
+hist3 <- ggplot(model_simple_3, aes(x=model_simple_3$residuals)) + geom_histogram(fill="green", colour="black", alpha=0.5, bins=70) + ggtitle("Model 3") + xlab("Residuals distribution") + xlim(-1.5, 1.5)
+
+res3 <- ggplot(model_simple_3, aes(x=model_simple_3$fitted.values ,y=model_simple_3$residuals)) + geom_point(colour="green", alpha=0.4) + geom_smooth(colour="black", alpha=0.7) + xlab("Fitted Values") + ylab("Residuals") + ggtitle("Model 3")  + xlim(5, 7.25) + ylim(-1.5, 1.5)
+
+
+# Model FULL
+hist4 <- ggplot(model_full, aes(x=model_full$residuals)) + geom_histogram(fill="orange", colour="black", alpha=0.5, bins=70) + ggtitle("Model Full") + xlab("Residuals distribution") + xlim(-1.5, 1.5)
+
+res4 <- ggplot(model_full, aes(x=model_full$fitted.values ,y=model_full$residuals)) + geom_point(colour="orange", alpha=0.4) + geom_smooth(colour="black", alpha=0.7) + xlab("Fitted Values") + ylab("Residuals") + ggtitle("Model Full")+ xlim(5, 7.25) + ylim(-1.5, 1.5)
+
+plot_grid(hist1, res1, hist2, res2, ncol=2)
+plot_grid(hist3, res3, hist4, res4, ncol=2)
+
+```
+
+Los residuos de los cuatro modelos siguen distribuciones normales. Los gráficos de la segunda columna muestran los residuos para cada uno de los valores estimados de la variable respuesta. Adicionalmente se muestra como varía el valor medio de los residuos (línea sólida negra). Idealmente, esta línea debería ser una recta de pendiente cero. Cuanto más estabilizada esté esta curva, mejor sera el comportamiento del modelo lineal.
+
+Atendiendo a los indicadores explicados anteriormente (distribución de residuos y variabilidad), podríamos confirmar que los modelos que ofrecen mejores resultados son el modelo 1 y modelo 2 (model_simple y model_simple2). 
+
+Teniendo en cuenta el error estandar y el *R² corregido* de ambos modelos (mostrados a continuación), podemos confirmar que el modelo que ofrece mejores prestaciones es el modelo 1 (model_simple). Este será el modelo utilizado para la caracterización de nuestra variable respuesta a partir de ahora.
+
+  * model_simple (0.24, 0.58)
+  * model_simple3 (0.29, 0.45)
+
+
+
+# Preparación de datos de Test
+
+En este apartado vamos a incluir todas las transformaciones realizadas a las variables en el *dataset test*. Con ello vamos a poder comparar los resultados de nuestro modelo de regresión con otras observaciones con el fin de saber sí el modelo es estable en diferentes muestras de datos. 
+
+
+
+## Imputación de datos faltantes al *dataset* de Test
+
+Histograma de los lenguajes de las muestras de test (16%). Esta muestra comprende observaciones de los años 2014 a 2017. 
+```{r}
+summary(dat_test$published_year)
+cat("Porcentaje de muestras: ", round(nrow(dat_test)/nrow(dat),2))
+```
+
+
+
+Valoramos el número de ocurrencias de variable **languages** igual a cero.
+```{r}
+ids_not_ok <- (dat_test$languages == 0 & str_detect(dat_test$tags, "music|dance|live music", negate = TRUE))
+n_not_ok <- length (ids_not_ok[ids_not_ok == TRUE])
+frec_nok <- n_not_ok/nrow(dat_test)
+porcentaje <- round(100*frec_nok, 1)
+if (porcentaje > 0){
+  cat("Porcentaje de observaciones de la variable languages con valor 0: ", porcentaje, "%")
+  
+  # Se guarda el histograma de los valores antes de la imputacion
+  p_orig <- ggplot(dat_test, aes(x=languages)) + geom_histogram(fill="red", alpha=0.3, colour="black", bins=max(dat_test$languages) - min(dat_test$languages)) + scale_y_continuous(limits=c(0, 250)) + ggtitle("Data test")
+  
+  # Obtenemos los valores a imputar:
+  languages_col <- 5
+  lang_mean <- mean(dat_test[!ids_not_ok, languages_col])
+  lang_sd <- sd(dat_test[!ids_not_ok, languages_col])
+  vals <- rnorm(n_not_ok, mean=lang_mean, sd=lang_sd)
+  vals <- round(vals, 0)
+  # Método de imputacion --> Distribucion normal 
+  
+  # imputamos los valores
+  languages_corrected_2 <- dat_test %>% select(languages) %>% mutate(languages = ifelse(languages == 0 & str_detect(tags, "music|dance|live music", negate = TRUE), vals, languages))
+  p_corrected_2 <- ggplot(languages_corrected_2, aes(x=languages)) + geom_histogram(fill="green", alpha=0.3, colour="black", bins=max(dat_test$languages) - min(dat_test$languages)) + scale_y_continuous(limits=c(0, 250))  + ggtitle("Método 2 (d. normal)")
+  plot_grid(p_orig, p_corrected_1, p_corrected_2, ncol=3)
+  
+  
+} else {
+  cat("No hay ceros que necesiten ser imputados en las observaciones actuales.")
+}
+
+dat_test <- dat_test %>% filter(!(languages == 0))
+summary(dat_test$languages)
+```
+
+
+## Transformaciones de variables cuantitativas 
+
+
+Las variables numéricas sobre las que se aplicaron transformaciones tras el *EDA* en el conjunto de datos de entrenamiento, y que deben tranformarse también en el set de tes son: **views**, **comments** y **duration**. 
+
+Aplicamos logaritmos y observamos el resultado de las variables numéricas almacenadas en el conjunto de test:
+
+```{r message=FALSE}
+#Actualizamos dataframe
+dat_test$views <- log10(dat_test$views)
+dat_test$comments <- log10(dat_test$comments)
+dat_test$duration <- log10(dat_test$duration)
+
+p1 <- ggplot(dat_test, aes(x=views)) + geom_histogram(fill="red", alpha=0.5, colour="black")
+p2 <- ggplot(dat_test, aes(x=comments)) + geom_histogram(fill="blue", alpha=0.5, colour="black")
+p3 <- ggplot(dat_test, aes(x=duration)) + geom_histogram(fill="green", alpha=0.5, colour="black")
+p4 <- ggplot(dat_test, aes(x=languages)) + geom_histogram(fill="orange", alpha=0.5, colour="black", bins=max(dat_test$languages)-min(dat_test$languages))
+p5 <- ggplot(dat_test, aes(x=published_year)) + geom_histogram(fill="yellow",alpha=0.5, colour="black", bins=4) 
+plot_grid(p1, p2, p3, p4, p5, align="h", ncol=3)
+```
+
+
+## Procesado de variables cualitativas  en el *dataset* de Test
+
+Al no incluir la variable **speaker_pop** en el modelo no la utilizamos en el test. 
+
+### Convertir los rating en variable categórica
+
+Los **ratings** se agrupan de forma que nos den una valoración general del vídeo. Al igual que en el caso del *dataset train*. 
+
+```{r}
+general_opinion <- NULL
+for (i in 1:dim(dat_test)[1]){
+  general_opinion[i] <- opin_fun(dat_test[i,])
+}
+dat_test$general_opinion <- general_opinion
+```
+
+En el último paso quitamos del *dataset* las variables de **rating** quedando únicamente la opinión general. 
+```{r}
+dat_test <- select(dat_test, -(Unconvincing:Beautiful))
+dat_test$general_opinion <- factor(dat_test$general_opinion, ordered = TRUE, levels = c("negative", "neutral", "positive"))
+contrasts(dat_test$general_opinion, how.many = 1) <- contr.poly(3)
+```
+
+### Agrupar los nombres de los eventos en el *datset* Test
+
+Usamos el mismo método que en el *train* para agrupar los eventos en menos clases. 
+
+```{r}
+dat_test$event <- gsub('[0-9]+', "", dat_test$event)
+dat_test$event <- gsub("[[:punct:]]","", dat_test$event)
+dat_test$event <- gsub('TEDx.*', "TEDx", dat_test$event)
+dat_test$event <- gsub('TEDGlobal.*', "TEDGlobal", dat_test$event)
+dat_test$event <- gsub('TED@.*', "TED@", dat_test$event)
+```
+
+
+Una vez realizados los grupos vemos las charlas *TED* que más se han llevado a cabo. A partir de un *count*. 
+
+```{r}
+event_count <- count(distinct(dat_test), event)
+event_count <- event_count %>% arrange(desc(n))
+head(event_count)
+```
+
+
+Se puede observar como las charlas *TED*, las *TED Global* y las *TEDx* siguen siendo los eventos más frecuentes, por lo que reducimos la variable evento en cuatro categorías. *TED*, *TedGlobal*, *TEDx* y *Other*. 
+
+```{r}
+dat_test <- dat_test %>% mutate(event = ifelse(str_detect(dat_test$event, "TED$|TEDx$|TEDGlobal$", negate = TRUE), "Other", event))
+dat_test$event <- factor(dat_test$event)
+levels(dat_test$event)
+```
+
+# Evaluación del modelo de regresión lineal múltiple
+
+
+Una vez calculado el modelo, se empleará el conjunto de entrenamiento para la predicción de la variable **views** sobre los datos de *test*. Para ello, se introducirán los datos de *dat_test* en el modelo *model_simple*.
+
+
+```{r  warning=FALSE}
+pred_simple <- predict.lm(model_simple, newdata = dat_test)
+df_views = data.frame(observed = dat_test$views, predicted=pred_simple)
+summary(df_views)
+```
+
+Se puede apreciar una similitud entre los valores predecidos y los observados. Para aportar más información de las predicciones se muestran *boxplots*, histogramas y gráficos de densidad.  
+
+
+```{r, warning=FALSE}
+b1 <- ggplot(df_views, aes(x="views", y=observed)) + geom_boxplot(fill = "red", alpha=0.5) 
+b2 <- ggplot(df_views, aes(x="views", y=predicted)) + geom_boxplot(fill = "blue", alpha=0.5)
+p1 <- ggplot(df_views, aes(x=observed)) + geom_histogram(aes(y = ..density..), alpha = 0.3, fill="blue", col="black", bins=10) + geom_density(aes(y = ..density..), fill="red", alpha = 0.3)
+p2 <- ggplot(df_views, aes(x=predicted)) + geom_histogram(aes(y = ..density..), alpha = 0.3, fill="red", col="black", bins=10) + geom_density(aes(y = ..density..), fill="blue", alpha = 0.3)
+plot_grid(b1,p1,b2,p2)
+```
+
+Otro análisis visual interesante de realizar y visualizar es la comparación de los valores predichos y observados en un *scatterplot* representando uno frente al otro.
+
+```{r}
+p_result <- ggplot(data=df_views, aes(x=observed, y=predicted)) +
+  geom_point() + 
+  geom_smooth(method=lm) +
+  labs(title="Visualizaciones por video", x="Observadas", y="Predecidas")
+p_result
+```
+
+Pero para un análisis más analítico y numérico, se realizará una medición de la raíz del error cuadrático medio (RMSE), que medirá la diferencia entre los valores predichos por el modelo de regresión lineal y los valores observados. Para ello, se comparará su valor tanto aplicando el modelo en el conjunto de entrenamiento como en el de *test*, deshaciendo más tarde las transformaciones logarítmicas aplicadas tanto en lo observado como en lo esperado.
+
+```{r}
+pred_simple_train <- predict.lm(model_simple, newdata = dat_train)
+df_views_train = data.frame(observed = dat_train$views, predicted=pred_simple_train)
+rsme_observed_train <- 10**(df_views_train$observed)
+rsme_predicted_train <- 10**(df_views_train$predicted)
+rmse_train <- sqrt(sum((rsme_observed_train - rsme_predicted_train)^2)/nrow(df_views_train))
+cat(paste0("Desviacion estandar en train: ", round(sd(rsme_observed_train), 2)))
+cat(paste0("Resultado del RMSE en train: ", round(rmse_train, 2)))
+```
+
+Aplicar el modelo sobre el conjunto train muestra que la raíz del error cuadrático medio es menor que la desviación estándar de los datos, lo que es un buen indicativo de que el modelo es capaz de predecir mínimamente y no proporciona resultados totalmente aleatorios.
+
+
+```{r}
+rsme_observed <- 10**(df_views$observed)
+rsme_predicted <- 10**(df_views$predicted)
+rmse <- sqrt(sum((rsme_observed - rsme_predicted)^2)/nrow(df_views))
+cat(paste0("Desviacion estandar en test: ", round(sd(rsme_observed), 2)))
+cat(paste0("Resultado del RMSE en test: ", round(rmse, 2)))
+```
+
+En contraposición, aplicar el modelo sobre el conjunto test muestra un error cuadrático medio mayor a la desviación estandar de los datos, lo que no es una buena señal para un modelo predictivo en datos futuros. Esto podría deberse a que debido al *split temporal* realizado por la dependencia de ciertas variables con respecto al tiempo, los datos utilizados en el conjunto *train* son bastante diferentes al conjunto *test*, como puede mostrar la diferencia de la desviación estandar en *train* y *test* (*2870686* visitas frente a *1487305*).
+
+
+
+# Preparación de datos de Validación
+
+En este apartado vamos a incluir todas las transformaciones realizadas a las variables en el *dataset validation*. En este caso como no hemos podido utilizar métodos de validación cruzada como el *k-folds*, al tener un *dataset* de serie temporal y tampoco hemos podido utilizar otros métodos de análisis como *tree-based method*s, *support vector machines*, *PCA* etc. porque la práctica se trataba de trabajar con modelos de regresión lineal, el apartado de *test* y *validation* son similares.
+
+Sin embargo, utilizar una separación en tres partes del *dataset*, reservando una muestra para validación, creemos que es necesario debido a que da información sobre sí nuestro modelo de regresión lineal es estable, al contraponer los resultados de la predicción con el *data set test* y el *data set validation* y además sienta unas bases de trabajo fundamentadas en buenas prácticas que van a ser muy útiles cuando trabajemos sobre problemas más complejos y podamos utilizar otra serie de métodos de análisis. 
+
+Por último, solo comentar que esta parte de la práctica la hemos realizado, tras implementar los consejos del equipo docente en la presentación del día 19 de diciembre, como se puede comprobar en la entrega realizada el día 18 de diciembre, en el que se divide el *dataset* en *train*, *test* y *validation* pero la muestra de *validation* no se utiliza en todo el resto de entrega.
+
+
+## Imputación de datos faltantes al *dataset* de validation
+
+Histograma de los lenguajes de las muestras de *validation* (20%). Siguiendo una distribución de 80% *train* y *test* y 20% *validation*.  Esta muestra comprende observaciones de los años 2014 a 2017. 
+```{r}
+summary(dat_validation$published_year)
+cat("Porcentaje de muestras: ", round(nrow(dat_validation)/nrow(dat),2))
+```
+
+
+
+Valoramos el numero de ocurrencias de variable **languages** igual a cero.
+```{r}
+ids_not_ok <- (dat_validation$languages == 0 & str_detect(dat_validation$tags, "music|dance|live music", negate = TRUE))
+n_not_ok <- length (ids_not_ok[ids_not_ok == TRUE])
+frec_nok <- n_not_ok/nrow(dat_validation)
+porcentaje <- round(100*frec_nok, 1)
+if (porcentaje > 0){
+  cat("Porcentaje de observaciones de la variable languages con valor 0: ", porcentaje, "%")
+  
+  # Se guarda el histograma de los valores antes de la imputacion
+  p_orig <- ggplot(dat_validation, aes(x=languages)) + geom_histogram(fill="red", alpha=0.3, colour="black", bins=max(dat_validation$languages) - min(dat_validation$languages)) + scale_y_continuous(limits=c(0, 250)) + ggtitle("Data validation")
+  
+  # Obtenemos los valores a imputar:
+  languages_col <- 5
+  lang_mean <- mean(dat_validation[!ids_not_ok, languages_col])
+  lang_sd <- sd(dat_validation[!ids_not_ok, languages_col])
+  vals <- rnorm(n_not_ok, mean=lang_mean, sd=lang_sd)
+  vals <- round(vals, 0)
+  # Método de imputacion --> Distribucion normal 
+  
+  # imputamos los valores
+  languages_corrected_2 <- dat_validation %>% select(languages) %>% mutate(languages = ifelse(languages == 0 & str_detect(tags, "music|dance|live music", negate = TRUE), vals, languages))
+  p_corrected_2 <- ggplot(languages_corrected_2, aes(x=languages)) + geom_histogram(fill="green", alpha=0.3, colour="black", bins=max(dat_validation$languages) - min(dat_validation$languages)) + scale_y_continuous(limits=c(0, 250))  + ggtitle("Método 2 (d. normal)")
+  plot_grid(p_orig, p_corrected_1, p_corrected_2, ncol=3)
+  
+  
+} else {
+  cat("No hay ceros que necesiten ser imputados en las observaciones actuales.")
+}
+
+dat_validation <- dat_validation %>% filter(!(languages == 0))
+summary(dat_validation$languages)
+```
+
+
+## Transformaciones de variables cuantitativas 
+
+
+Las variables numéricas sobre las que se aplicaron transformaciones tras el *EDA* en el conjuto de datos de entrenamiento, y que deben tranformarse también en el set de tes son: **views**, **comments** y **duration**. 
+
+Aplicamos logaritmos y observamos el resultado de las variables numéricas almacenadas en el conjunto de *validation*:
+
+```{r message=FALSE}
+#Actualizamos dataframe
+dat_validation$views <- log10(dat_validation$views)
+dat_validation$comments <- log10(dat_validation$comments)
+dat_validation$duration <- log10(dat_validation$duration)
+
+p1 <- ggplot(dat_validation, aes(x=views)) + geom_histogram(fill="red", alpha=0.5, colour="black")
+p2 <- ggplot(dat_validation, aes(x=comments)) + geom_histogram(fill="blue", alpha=0.5, colour="black")
+p3 <- ggplot(dat_validation, aes(x=duration)) + geom_histogram(fill="green", alpha=0.5, colour="black")
+p4 <- ggplot(dat_validation, aes(x=languages)) + geom_histogram(fill="orange", alpha=0.5, colour="black", bins=max(dat_validation$languages)-min(dat_validation$languages))
+p5 <- ggplot(dat_validation, aes(x=published_year)) + geom_histogram(fill="yellow",alpha=0.5, colour="black", bins=4) 
+plot_grid(p1, p2, p3, p4, p5, align="h", ncol=3)
+```
+
+## Procesado de variables cualitativas  en el *dataset* de *validation*
+
+### Convertir los rating en variable categórica
+
+Los **ratings** se agrupan de forma que nos den una valoración general del vídeo. Al igual que en el caso de *train*. 
+
+```{r}
+general_opinion <- NULL
+for (i in 1:dim(dat_validation)[1]){
+  general_opinion[i] <- opin_fun(dat_validation[i,])
+}
+dat_validation$general_opinion <- general_opinion
+```
+
+En el último paso quitamos del *dataset* las variables de **rating** quedando únicamente la opinión general. 
+```{r}
+dat_validation <- select(dat_validation, -(Unconvincing:Beautiful))
+dat_validation$general_opinion <- factor(dat_validation$general_opinion, ordered = TRUE, levels = c("negative", "neutral", "positive"))
+contrasts(dat_validation$general_opinion, how.many = 1) <- contr.poly(3)
+```
+
+
+### Agrupar los nombres de los eventos en el datset validation
+
+Usamos el mismo método que en el *train* para agrupar los eventos en menos clases. 
+
+```{r}
+dat_validation$event <- gsub('[0-9]+', "", dat_validation$event)
+dat_validation$event <- gsub("[[:punct:]]","", dat_validation$event)
+dat_validation$event <- gsub('TEDx.*', "TEDx", dat_validation$event)
+dat_validation$event <- gsub('TEDGlobal.*', "TEDGlobal", dat_validation$event)
+dat_validation$event <- gsub('TED@.*', "TED@", dat_validation$event)
+```
+
+
+Una vez realizados los grupos vemos las charlas *TED* que más se han llevado a cabo. A partir de un *count*. 
+
+```{r}
+event_count <- count(distinct(dat_validation), event)
+event_count <- event_count %>% arrange(desc(n))
+head(event_count)
+```
+
+
+Se puede observar como las charlas **TED*, las *TED Global* y las *TEDx* siguen siendo los eventos más frecuentes, por lo que reducimos la variable evento en cuatro categorías. *TED*, *TedGlobal*, *TEDx* y *Other*. 
+
+```{r}
+dat_validation <- dat_validation %>% mutate(event = ifelse(str_detect(dat_validation$event, "TED$|TEDx$|TEDGlobal$", negate = TRUE), "Other", event))
+dat_validation$event <- factor(dat_validation$event)
+levels(dat_validation$event)
+```
+
+# Evaluación del modelo de regresión lineal múltiple
+
+
+Una vez calculado el modelo, se empleará el conjunto de entrenamiento para la predicción de la variable *views* sobre los datos de *validation*. Para ello, se introducirán los datos de *dat_validation* en el modelo *model_simple*.
+
+
+```{r,  warning=FALSE}
+pred_simple <- predict.lm(model_simple, newdata = dat_validation)
+df_views = data.frame(observed = dat_validation$views, predicted=pred_simple)
+summary(df_views)
+```
+
+Se puede apreciar una similitud entre los valores predecidos y los observados. Para aportar más información de las predicciones se muestran *boxplots*, histogramas y gráficos de densidad.
+
+
+```{r, warning=FALSE}
+b1 <- ggplot(df_views, aes(x="views", y=observed)) + geom_boxplot(fill = "red", alpha=0.5) 
+b2 <- ggplot(df_views, aes(x="views", y=predicted)) + geom_boxplot(fill = "blue", alpha=0.5)
+p1 <- ggplot(df_views, aes(x=observed)) + geom_histogram(aes(y = ..density..), alpha = 0.3, fill="blue", col="black", bins=10) + geom_density(aes(y = ..density..), fill="red", alpha = 0.3)
+p2 <- ggplot(df_views, aes(x=predicted)) + geom_histogram(aes(y = ..density..), alpha = 0.3, fill="red", col="black", bins=10) + geom_density(aes(y = ..density..), fill="blue", alpha = 0.3)
+plot_grid(b1,p1,b2,p2)
+```
+
+Otro análisis visual interesante de realizar y visualizar es la comparación de los valores predichos y observados en un *scatterplot* representando uno frente al otro.
+
+```{r}
+p_result <- ggplot(data=df_views, aes(x=observed, y=predicted)) +
+  geom_point() + 
+  geom_smooth(method=lm) +
+  labs(title="Visualizaciones por video", x="Observadas", y="Predecidas")
+p_result
+```
+
+Nuevamente se realizará una medición de la raíz del error cuadrático medio *(RMSE)*, que medirá la diferencia entre los valores predichos por el modelo de regresión lineal y los valores observados, deshaciendo las transformaciones logarítmicas aplicadas anteriormente.
+
+```{r}
+rsme_observed <- 10**(df_views$observed)
+rsme_predicted <- 10**(df_views$predicted)
+rmse <- sqrt(sum((rsme_observed - rsme_predicted)^2)/nrow(df_views))
+cat(paste0("Desviacion estandar en validation: ", round(sd(rsme_observed), 2)))
+cat(paste0("Resultado del RMSE en validation: ", round(rmse, 2)))
+```
+
+Una vez más, se presenta el mismo problema que al aplicar el modelo en el conjunto *test*, pues muestra un error cuadrático medio mayor a la desviación estandar de los datos. Se puede observar que la desviación estándar de los datos en *validation* es aproximadamente igual a la desviación estándar en los datos de *test*, lo que sugiere que una posible opción para intentar mejorar el modelo podría ser descartar los datos del conjunto *train* y entrenar el modelo en el conjunto *test*. Esta observación podría tener sentido, pues el *split temporal* realizado separa los vídeos de antes del *2014* (los escogidos para el conjunto *train*) de los publicados después de esa fecha, que podría ser precisamente el año en el que las *TED Talks* se empezaran a hacer más populares y se produjera una divergencia de los datos, siendo de gran similitud los de después de *2014*.
+
+# Apartado adicional
+
+Como tarea adicional, se ha propuesto por parte del equipo docente responder a la siguiente pregunta: ¿Qué valores deben tener las variables de mi modelo para que mi respuesta tenga un valor de 1.000.000?
+
+Este apartado comprende la resolución de dicha cuestión.
+
+Para resolver la problemática, definimos una función que recoja los coeficientes de las tres primeras variables y la ordenada en el origen. Iremos modificando los valores de las variables de entrada, dentro de sus rangos, para obtener aproximadamente 1 millón de visualizaciones. Dichos rangos son los siguientes:
+
+```{r}
+calc_views <- function(model, x_lang, x_com, x_dur){
+  b0 <- model$coefficients[1]
+  b1 <- model$coefficients[2]
+  b2 <- model$coefficients[3]
+  b3 <- model$coefficients[4]
+
+  # conversion for input variables as defined in the model
+  x_com <- log10(x_com)
+  x_dur <- log10(x_dur)
+  
+  # output calculation
+  y = 10^(b0 + b1*x_lang + b2*x_com + b3*x_dur)
+  cat("Resultado: ", y, " views")
+}
+
+
+# rangos de las variables
+cat("Rango para languages: [", min(dat_train$languages), ", ", max(dat_train$languages), "]\n")
+cat("Rango para comments: [", 10^(min(dat_train$comments)), ", ", 10^(max(dat_train$comments)), "]\n")
+cat("Rango para duration: [", 10^(min(dat_train$duration)), ", ", 10^(max(dat_train$duration)), "]\n")
+
+```
+
+Los siguientes valores de las variables permiten obtener una respuesta de aproximadamente 1 millón de visualizaciones:
+
+```{r}
+# Rangos mínimos de los valores de entrenamiento
+# languages: [ 3 ,  72 ]
+# comments: [ 9, 6404 ]
+# duration: [ 135, 5256 ]
+
+# Modify input variables to get 1.000.000 views as output
+
+# Model inputs:
+x_languages <- 10
+x_comments <- 1000
+x_duration <- 950
+
+cat("Variables de entrada al modelo:\nlanguages: ", x_languages, "\ncomments:", x_comments, "\nduration:", x_duration, "minutos\n")
+calc_views(model_simple, x_languages, x_comments, x_duration)
+
+```
+
+
+# Resumen y conclusiones
+
+## Resumen
+
+
+El objetivo del proyecto era estimar las visualizaciones que iba a tener un vídeo subido a la plataforma *TED Talks* a través de un modelo de regresión lineal multivariante. Para este propósito se han desarrollado las siguientes tareas:
+
+* Carga del *dataset*. Variables tras cargar el *dataset*: 17.
+      
+* Preprocesado básico de variables **tags**, **ratings**, **film_date** y **published_date**. Variables resultantes: 36.
+
+* División del conjunto de datos en train, test y validation (*dataset* previamente ordenado según información temporal):
+  * Train --> 64% de las observaciones
+  * Test --> 16% de las observaciones
+  * Validation --> 20% de las observaciones
+
+* Análisis exploratorio de datos, transformación y selección de variables (cuantitativas y cualitativas). Variables resultantes: 11.
+
+* Selección de variables (apoyándonos en método leaps::regsubsets). Variables seleccionadas para el modelo: 5.
+    * languages
+    * comments 
+    * duration
+    * general_opinion
+    * event
+
+* Generación y selección del modelo (distintas combinaciones de variables estudiadas)
+
+* Preparación de datos de test (aplicación de transformaciones; las mismas que sobre observaciones de train)
+
+* Evaluación del modelo actual con las muestras de test
+
+* Evaluación del modelo actual con las muestras de validation
+ 
+   
+## Conclusiones
+
+La selección del conjunto de datos ha sido un factor condicionante a la hora de aplicar el modelo de regresión lineal. Se trataba de un *dataset* con gran cantidad de variables categóricas que condicionaban la variable respuesta (numérica). Probablemente conocimientos de análisis de texto podrían ser útiles para futuras mejoras del modelo.
+
+
+A pesar de las limitaciones del set de datos, se han podido aplicar los conocimientos adquiridos en la asignatura. El número reducido de variables numéricas ha demostrado no ser suficiente para generar un modelo preciso, pero permite hacer una estimación de la variable respuesta que ofrece un *RMSE* de 0,47.
+
